@@ -1,0 +1,240 @@
+# Load libraries
+import numpy as np 
+import math
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+from matplotlib.axis import Axis
+
+pi=np.pi
+deg2rad=pi/180
+rad2deg=1/deg2rad
+
+
+#Definition of insolation
+
+def Q_lat(xs,L=1,S0=1353.0):    
+    return  L*(S0/4)*(1 - 0.241*( 3*np.square(xs) - 1 )) 
+ 
+ 
+ # Define functions in the steady state version of the North model
+
+# Define the albedo function
+def albedo(T,jmx, noalbedoflag):   
+    alb=np.ones(jmx)*0.3   
+    k=np.argwhere(T<=-10) 
+    alb[k]=0.6# recalculate albedo for snowline at T=-10C   
+    return alb 
+
+# Define the intermediate function to calculate matrix coefficients
+def setupfastMh(delx,jmx,D,B,Cl,delt):  
+    #set up lambda array.
+    lam=(1-np.arange(-1,1,delx)*np.arange(-1,1,delx))/(delx*delx) 
+    lam=D[0:jmx]*lam  
+    M=np.zeros((jmx,jmx)) 
+    M[0,0]=-B-lam[1] 
+    M[0,1]=lam[1] 
+    M[jmx-1,jmx-2]=lam[jmx-1]
+    M[jmx-1,jmx-1]=-B-lam[jmx-1]
+    for jj in range(jmx-2):
+        j=jj+2
+        M[j-1,j-2] = lam[j-1]
+        M[j-1,j-1]   = -B - (lam[j]+lam[j-1])
+        M[j-1,j] = lam[j]
+    # add in heat capacities
+    M=M/Cl
+    # calculate the inverse of M', the matrix operator.
+    Mh=M
+ 
+    return Mh
+
+def setupfastinvM(Mh,jmx,delt):
+    M=0.5*Mh
+    for j in range(jmx):
+        M[j,j]=M[j,j]-1/delt
+    invM = np.linalg.inv(M) 
+    return invM
+
+
+#Set physical parameters
+D=0.44
+Toffset=-40 #for Snowball Earth start
+noalbedoflag=1
+Cl=0.2
+co2 = 416.45
+S0=1353.0
+L=1
+
+# Set model parameters
+jmx=1000
+delt=1/50
+NMAX=1000
+delx=2/jmx
+
+# define an array with latitude steps in both x and phi
+x= np.linspace(-1,1,jmx)
+phi=np.arcsin(x)*rad2deg
+
+#calculate initial phis, A and B
+phis=np.log(co2/300) 
+B=1.953-0.04866*phis+0.01309*phis**2-0.002577*phis**3 
+A=(-326.4+(9.161*phis)-(3.164*phis**2)+(0.5468*phis**3))+B*273.15 
+
+# Calculate an array of annual mean insolation for the latitudes steps
+Q=Q_lat(x,L,S0)  
+
+# Calculate an array of diffussion constants
+xmp=np.arange(-1,1+delx,delx)
+D=D*np.ones(jmx+1)
+
+# define initial T array
+T = 20*(1-2*np.square(x))
+T=T+Toffset
+
+# Calculate initial global mean temperature
+Tglob=np.mean(T)
+
+# Calculate initial albedo
+alb=albedo(T,jmx,noalbedoflag)
+
+# Initial boundary conditions
+src=(1-alb)*Q/Cl-A/Cl
+Mh=setupfastMh(delx,jmx,D,B,Cl,delt)
+invM=setupfastinvM(Mh,jmx,delt)
+h=np.dot(Mh,T)+src
+
+#initial array for time, A, B, co2ppm and Tglobal
+time=np.array(range(0,10000000,10000))
+A=np.zeros(len(time))
+B=np.zeros(len(time))
+co2ppm=np.zeros(len(time))
+Tglobal=np.zeros(len(time))
+
+#for the ice depth initial arrays and values 
+K=2.1 #heat conductivity for ice
+Q_heat=50*10**-3 #geothermal heat flux
+Tb=0
+ice_depth=np.zeros(len(phi))
+ice_depth_global=np.zeros(len(time))
+ice_depth_save=np.zeros((len(phi),len(time)))
+
+#temperature per latitude per time
+temp_save=np.zeros((len(phi),len(time)))
+
+
+
+#First time stepping loop, calculation of A and B in respect to time
+timeshift=0
+i=0
+for t in time:
+    
+    #calculate phis, co2ppm, A and B
+    phis=np.log((co2+((1.29*10**-2)*t))/300)  
+    co2ppm[i]=co2+((1.29*10**-2)*t)
+    B[i]=1.953-0.04866*phis+0.01309*phis**2-0.002577*phis**3
+    A[i]=(-326.4+(9.161*phis)-(3.164*phis**2)+(0.5468*phis**3))+B[i]*273.15
+    Mh=setupfastMh(delx,jmx,D,B[i],Cl,delt)
+    invM=setupfastinvM(Mh,jmx,delt)
+    
+    #Second time stepping loop
+    for n in range(NMAX):
+        Tglob_prev=Tglob
+        # calculate src for this loop
+        alb=albedo(T,jmx,noalbedoflag)
+        src=(1-alb)*Q/Cl-A[i]/Cl 
+        # Calculate new T.
+        T=-np.dot(invM,0.5*(h+src)+T/delt)
+        # Calculate h for next loop.
+        h=np.dot(Mh,T)+src
+        # Check to see if global mean temperature has converged
+        Tglob=np.mean(T)
+        Tchange = Tglob-Tglob_prev
+        if abs(Tchange)< 1e-12:
+            break
+            
+    Tglobal[i]=Tglob
+           
+    #To calculate the ice depth
+    ice_depth=(K*(Tb-T))/Q_heat #Ice depth for each latitude 
+    ice_depth[ice_depth<0]=0 #replace negative ice depths with zero
+    ice_depth_global[i]=np.mean(ice_depth) 
+    ice_depth_save[:,i]=ice_depth #Save ice depth for each time step
+    
+    #temperature per latitude per time
+    temp_save[:,i]=T
+    
+    #Duration for Snowball Earth (only the first value)
+    if abs(Tglobal[i]>-10):
+
+        timeshift = time[i]
+        print("Timeshift",timeshift)
+    
+    i=i+1  
+    
+    
+    #plots layout
+sns.set_style('darkgrid')      # darkgrid
+plt.rc('axes', titlesize=16)     # fontsize of the axes title
+plt.rc('axes', labelsize=12)    # fontsize of the x and y labels
+plt.rc('xtick', labelsize=11)    # fontsize of the tick xlabels
+plt.rc('ytick', labelsize=11)    # fontsize of the tick ylabels
+plt.rc('legend', fontsize=11)    # legend fontsize
+plt.rc('font', size=11)          # controls default text sizes
+
+
+#Temperature for latitudes over time
+fig, ax1 = plt.subplots(figsize=(10,5))
+pcol=ax1.pcolor(time,phi,temp_save,cmap='jet')
+ax1.set_xlabel('Time/years')
+plt.colorbar(pcol,label='Temperature [C°]')
+plt.ylabel("Latitude")
+ax1.title.set_text('Temperature for latitudes over time')
+ax1.ticklabel_format(style='plain')
+
+
+
+# Ice depth for latitudes over time
+fig, ax1 = plt.subplots(figsize=(10,5))
+pcol=ax1.pcolor(time,phi,ice_depth_save,cmap='jet_r')
+ax1.set_xlabel('Time/years')
+plt.colorbar(pcol,label='Ice depth/m')
+plt.ylabel("Latitude")
+ax1.title.set_text('Ice depth for latitudes over time')
+ax1.ticklabel_format(style='plain')
+
+# Ice depth over time
+plt.figure()
+plt.plot(time,ice_depth_global, color = 'deeppink', )
+plt.xlabel("time [years]")
+plt.ylabel("depth [meter]")
+plt.xlim([0,np.max(time)])
+plt.title('Ice depth over time')
+plt.ticklabel_format(style='plain')
+
+# Temperature over time
+plt.figure()
+plt.plot(time,Tglobal, color = 'lightgreen')
+plt.xlabel("time [years]")
+plt.ylabel("Temperature [°C]")
+plt.ticklabel_format(style='plain')
+plt.title('Temperature over time')
+
+print((Tglobal[0])) #Initial global temperature
+
+
+#Plot for A for ensuring realitic values
+plt.figure()
+plt.figure(figsize=(20,5))
+plt.plot(time,A,c="r")
+plt.xticks(rotation=90)
+plt.ylabel("A")
+
+#plot for B for ensuring realitic values
+plt.figure
+plt.plot(time,B)
+
+#plot for co2ppm
+plt.figure
+plt.plot(time,(co2ppm), color = 'darkviolet')
+plt.xlabel("time [years]")
+plt.ylabel("CO2 concentration [ppm]")
